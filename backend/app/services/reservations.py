@@ -1,6 +1,6 @@
 from datetime import datetime
-from decimal import Decimal
-from typing import Dict, Any, List
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Dict, Any, Optional
 
 async def calculate_monthly_revenue(property_id: str, month: int, year: int, db_session=None) -> Decimal:
     """
@@ -31,60 +31,122 @@ async def calculate_monthly_revenue(property_id: str, month: int, year: int, db_
     
     return Decimal('0') # Placeholder for now until DB connection is finalized
 
-async def calculate_total_revenue(property_id: str, tenant_id: str) -> Dict[str, Any]:
+async def calculate_total_revenue(
+    property_id: str,
+    tenant_id: str,
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+) -> Dict[str, Any]:
     """
-    Aggregates revenue from database.
+    Aggregates monthly revenue from database.
+    If month/year are not provided, uses the latest month with reservations.
     """
     try:
-        # Import database pool
         from app.core.database_pool import DatabasePool
-        
-        # Initialize pool if needed
+        from sqlalchemy import text
+
         db_pool = DatabasePool()
         await db_pool.initialize()
-        
-        if db_pool.session_factory:
-            async with db_pool.get_session() as session:
-                # Use SQLAlchemy text for raw SQL
-                from sqlalchemy import text
-                
-                query = text("""
-                    SELECT 
-                        property_id,
-                        SUM(total_amount) as total_revenue,
-                        COUNT(*) as reservation_count
-                    FROM reservations 
-                    WHERE property_id = :property_id AND tenant_id = :tenant_id
-                    GROUP BY property_id
+
+        if not db_pool.session_factory:
+            raise Exception("Database pool not available")
+
+        async with db_pool.get_session() as session:
+            target_month = month
+            target_year = year
+
+            if target_month is None or target_year is None:
+                latest_period_query = text("""
+                    SELECT
+                        EXTRACT(MONTH FROM latest.local_check_in)::int AS latest_month,
+                        EXTRACT(YEAR FROM latest.local_check_in)::int AS latest_year
+                    FROM (
+                        SELECT (r.check_in_date AT TIME ZONE p.timezone) AS local_check_in
+                        FROM reservations r
+                        JOIN properties p ON p.id = r.property_id AND p.tenant_id = r.tenant_id
+                        WHERE r.property_id = :property_id AND r.tenant_id = :tenant_id
+                        ORDER BY local_check_in DESC
+                        LIMIT 1
+                    ) latest
                 """)
-                
-                result = await session.execute(query, {
-                    "property_id": property_id, 
-                    "tenant_id": tenant_id
-                })
-                row = result.fetchone()
-                
-                if row:
-                    total_revenue = Decimal(str(row.total_revenue))
-                    return {
-                        "property_id": property_id,
-                        "tenant_id": tenant_id,
-                        "total": str(total_revenue),
-                        "currency": "USD", 
-                        "count": row.reservation_count
-                    }
+
+                latest_period = await session.execute(
+                    latest_period_query,
+                    {"property_id": property_id, "tenant_id": tenant_id},
+                )
+                latest_period_row = latest_period.fetchone()
+
+                if latest_period_row and latest_period_row.latest_month and latest_period_row.latest_year:
+                    target_month = int(latest_period_row.latest_month)
+                    target_year = int(latest_period_row.latest_year)
                 else:
-                    # No reservations found for this property
                     return {
                         "property_id": property_id,
                         "tenant_id": tenant_id,
                         "total": "0.00",
                         "currency": "USD",
-                        "count": 0
+                        "count": 0,
+                        "month": month,
+                        "year": year,
                     }
-        else:
-            raise Exception("Database pool not available")
-            
+
+            start_local = datetime(target_year, target_month, 1)
+            if target_month == 12:
+                end_local = datetime(target_year + 1, 1, 1)
+            else:
+                end_local = datetime(target_year, target_month + 1, 1)
+
+            query = text("""
+                SELECT
+                    r.property_id,
+                    COALESCE(SUM(r.total_amount), 0) as total_revenue,
+                    COUNT(*) as reservation_count
+                FROM reservations r
+                JOIN properties p ON p.id = r.property_id AND p.tenant_id = r.tenant_id
+                WHERE r.property_id = :property_id
+                  AND r.tenant_id = :tenant_id
+                  AND (r.check_in_date AT TIME ZONE p.timezone) >= :start_local
+                  AND (r.check_in_date AT TIME ZONE p.timezone) < :end_local
+                GROUP BY r.property_id
+            """)
+
+            result = await session.execute(
+                query,
+                {
+                    "property_id": property_id,
+                    "tenant_id": tenant_id,
+                    "start_local": start_local,
+                    "end_local": end_local,
+                },
+            )
+            row = result.fetchone()
+
+            if row:
+                # Financial totals are normalized to cents to avoid sub-cent drift.
+                total_revenue = Decimal(str(row.total_revenue)).quantize(
+                    Decimal("0.01"),
+                    rounding=ROUND_HALF_UP,
+                )
+                return {
+                    "property_id": property_id,
+                    "tenant_id": tenant_id,
+                    "total": str(total_revenue),
+                    "currency": "USD",
+                    "count": row.reservation_count,
+                    "month": target_month,
+                    "year": target_year,
+                }
+
+            return {
+                "property_id": property_id,
+                "tenant_id": tenant_id,
+                "total": "0.00",
+                "currency": "USD",
+                "count": 0,
+                "month": target_month,
+                "year": target_year,
+            }
+
     except Exception as e:
         print(f"Database error for {property_id} (tenant: {tenant_id}): {e}")
         
@@ -105,5 +167,7 @@ async def calculate_total_revenue(property_id: str, tenant_id: str) -> Dict[str,
             "tenant_id": tenant_id, 
             "total": mock_property_data['total'],
             "currency": "USD",
-            "count": mock_property_data['count']
+            "count": mock_property_data['count'],
+            "month": month,
+            "year": year,
         }
