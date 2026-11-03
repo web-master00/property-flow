@@ -3,7 +3,7 @@ import {
   BrowserRouter as Router,
   Routes,
   Route,
-  Navigate,
+  Link,
 } from "react-router-dom";
 import { AuthProvider } from "./contexts/AuthContext.new";
 import { checkAndClearInvalidTokens } from "./utils/clearAuthTokens";
@@ -33,7 +33,6 @@ import GlobalToast from "./components/GlobalToast";
 import { QueryClient } from "@tanstack/react-query";
 import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
 import { createSyncStoragePersister } from "@tanstack/query-sync-storage-persister";
-import localforage from "localforage";
 
 // Create context for sidebar state
 interface SidebarContextType {
@@ -82,9 +81,11 @@ const queryClient = new QueryClient({
   },
 });
 
-// Create persister using localforage (IndexedDB)
+// createSyncStoragePersister requires synchronous Storage semantics.
+// localforage is asynchronous and is not compatible with this adapter.
 const persister = createSyncStoragePersister({
-  storage: localforage as any,
+  storage: window.localStorage,
+  key: "property-flow:react-query-cache",
 });
 
 function AppWrapper() {
@@ -201,7 +202,7 @@ function AppContent() {
                         <Route path="/profile" element={<ProfilePage />} />
 
                         {/* Default redirect */}
-                        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+                        <Route path="*" element={<PageNotFound />} />
                       </Routes>
                     </main>
                   </div>
@@ -223,12 +224,12 @@ function PageNotFound() {
       <div className="text-center">
         <h1 className="text-6xl font-bold text-gray-900 mb-4">404</h1>
         <p className="text-xl text-gray-600 mb-8">Page not found</p>
-        <a
-          href="/dashboard"
+        <Link
+          to="/dashboard"
           className="inline-block px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
         >
           Go to Dashboard
-        </a>
+        </Link>
       </div>
     </div>
   );

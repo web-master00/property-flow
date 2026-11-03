@@ -1,34 +1,45 @@
-import json
-import redis.asyncio as redis
-from typing import Dict, Any, Optional
-import os
+"""Cache helpers for dashboard summaries."""
 
-# Initialize Redis client (typically configured centrally).
-redis_client = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+import redis.asyncio as redis
+from redis.exceptions import RedisError
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+redis_client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+
 
 async def get_revenue_summary(
     property_id: str,
     tenant_id: str,
-    month: Optional[int] = None,
-    year: Optional[int] = None,
-) -> Dict[str, Any]:
-    """
-    Fetches revenue summary, utilizing caching to improve performance.
-    """
-    cache_key = f"revenue:{tenant_id}:{property_id}:{year or 'auto'}:{month or 'auto'}"
-    
-    # Try to get from cache
-    cached = await redis_client.get(cache_key)
-    if cached:
-        return json.loads(cached)
-    
-    # Revenue calculation is delegated to the reservation service.
+    month: int | None = None,
+    year: int | None = None,
+) -> dict[str, Any]:
+    """Get a tenant-scoped revenue summary, bypassing Redis when unavailable."""
+    cache_key = f"revenue:v2:{tenant_id}:{property_id}:{year or 'latest'}:{month or 'latest'}"
+
+    try:
+        cached = await redis_client.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except (RedisError, json.JSONDecodeError, TypeError):
+        logger.warning("Revenue cache read failed; falling back to the database", exc_info=True)
+
     from app.services.reservations import calculate_total_revenue
-    
-    # Calculate revenue
-    result = await calculate_total_revenue(property_id, tenant_id, month=month, year=year)
-    
-    # Cache the result for 5 minutes
-    await redis_client.setex(cache_key, 300, json.dumps(result))
-    
+
+    result = await calculate_total_revenue(
+        property_id, tenant_id, month=month, year=year
+    )
+
+    try:
+        await redis_client.setex(cache_key, 300, json.dumps(result))
+    except RedisError:
+        logger.warning("Revenue cache write failed", exc_info=True)
+
     return result

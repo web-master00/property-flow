@@ -1,7 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Dict, Optional, Union, List
 import json
-import os
 import logging
 
 logger = logging.getLogger(__name__)
@@ -26,48 +25,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     
     def __init__(self, **kwargs):
-        """Initialize settings with debug logging"""
-        logger.info("🔧 SETTINGS INITIALIZATION DEBUG")
-        logger.info("=" * 50)
-        
-        # Log environment variable availability before Pydantic processing
-        critical_env_vars = {
-            'TOKEN_ENCRYPTION_KEY': os.getenv('TOKEN_ENCRYPTION_KEY'),
-            'SUPABASE_URL': os.getenv('SUPABASE_URL'), 
-            'SUPABASE_SERVICE_ROLE_KEY': os.getenv('SUPABASE_SERVICE_ROLE_KEY'),
-            'SUPABASE_JWT_SECRET': os.getenv('SUPABASE_JWT_SECRET'),
-            'SECRET_KEY': os.getenv('SECRET_KEY')
-        }
-        
-        for var_name, value in critical_env_vars.items():
-            if value:
-                preview = value[:15] + "..." if len(value) > 15 else value
-                logger.info(f"✅ ENV {var_name}: {preview} (len: {len(value)})")
-            else:
-                logger.info(f"❌ ENV {var_name}: NOT SET")
-        
-        # Call parent constructor
+        # Never log secret values (or prefixes). Pydantic handles environment
+        # loading and validation; operational diagnostics belong in health checks.
         super().__init__(**kwargs)
-        
-        # Log what Pydantic actually loaded
-        logger.info("📊 PYDANTIC LOADED VALUES:")
-        loaded_values = {
-            'token_encryption_key': getattr(self, 'token_encryption_key', None),
-            'supabase_url': getattr(self, 'supabase_url', None),
-            'supabase_service_role_key': getattr(self, 'supabase_service_role_key', None),
-            'supabase_jwt_secret': getattr(self, 'supabase_jwt_secret', None),
-            'secret_key': getattr(self, 'secret_key', None)
-        }
-        
-        for field_name, value in loaded_values.items():
-            if value:
-                preview = str(value)[:15] + "..." if len(str(value)) > 15 else str(value)
-                logger.info(f"✅ LOADED {field_name}: {preview} (len: {len(str(value))})")
-            else:
-                logger.info(f"❌ LOADED {field_name}: NOT SET")
-        
-        logger.info("=" * 50)
-        logger.info("🏁 SETTINGS INITIALIZATION COMPLETE")
 
     # Hostaway API Tokens (JSON string)
     hostaway_tokens: Optional[str] = None
@@ -96,8 +56,12 @@ class Settings(BaseSettings):
 
     @property
     def CRON_SECRET(self) -> str:
-        """Get the cron secret for easy access"""
-        return self.cron_secret or "dev-secret"
+        """Return the configured cron secret, with a dev-only fallback."""
+        if self.cron_secret:
+            return self.cron_secret
+        if self.environment.lower() not in {"development", "dev", "test"}:
+            raise RuntimeError("CRON_SECRET must be configured outside development")
+        return "dev-secret"
 
     # n8n Integration
     n8n_webhook_secret: Optional[str] = None
@@ -143,7 +107,6 @@ class Settings(BaseSettings):
                 return {}
 
             logger.debug(f"HOSTAWAY_TOKENS length: {len(self.hostaway_tokens)}")
-            logger.debug(f"HOSTAWAY_TOKENS preview: {self.hostaway_tokens[:100]}...")
 
             # First try to parse as JSON
             try:
@@ -178,7 +141,6 @@ class Settings(BaseSettings):
 
         except Exception as e:
             logger.error(f"Unexpected error parsing HOSTAWAY_TOKENS: {e}")
-            logger.error(f"Raw value: {self.hostaway_tokens}")
             return {}
 
     def get_hostaway_token_for_city(self, city: str) -> Union[str, None]:
